@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>台股財報分析</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📊</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ── 搜尋頁 ────────────────────────────────── -->
+<section id="view-search">
+  <div class="hero">
+    <div class="hero-logo">📊</div>
+    <h1>台股財報分析</h1>
+    <p class="hero-sub">輸入公司名稱或股票代號<br>自動產生經營 / 獲利 / 財務健全度三維分析</p>
+  </div>
+
+  <div class="searchbox">
+    <input id="q" type="search" inputmode="search" autocomplete="off"
+           placeholder="例如：台積電 或 2330" enterkeyhint="search">
+    <button id="go" type="button">分析</button>
+  </div>
+  <ul id="suggest" class="suggest" hidden></ul>
+
+  <div class="hot">
+    <span class="hot-label">熱門</span>
+    <div class="chips">
+      <button class="chip" data-q="2330">2330 台積電</button>
+      <button class="chip" data-q="2317">2317 鴻海</button>
+      <button class="chip" data-q="2454">2454 聯發科</button>
+      <button class="chip" data-q="2308">2308 台達電</button>
+      <button class="chip" data-q="2412">2412 中華電</button>
+      <button class="chip" data-q="2603">2603 長榮</button>
+      <button class="chip" data-q="1101">1101 台泥</button>
+      <button class="chip" data-q="6488">6488 環球晶</button>
+    </div>
+  </div>
+
+  <p class="foot-note">
+    資料來源：FinMind 開放 API（財報三表・股利）＋ 公開資訊觀測站 MOPS（管銷研發明細）。<br>
+    僅供研究參考，不構成投資建議。
+  </p>
+</section>
+
+<!-- ── 結果頁 ────────────────────────────────── -->
+<section id="view-result" hidden>
+  <header class="topbar">
+    <button id="back" class="icon-btn" type="button" aria-label="返回">‹</button>
+    <div class="topbar-title">
+      <strong id="co-name">—</strong>
+      <span id="co-meta"></span>
+    </div>
+    <button id="download" class="icon-btn" type="button" aria-label="下載報告">⤓</button>
+  </header>
+
+  <div id="verifybar" class="verifybar"></div>
+  <div id="warnings"></div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="ops">📊 經營</button>
+    <button class="tab" data-tab="profit">💰 獲利</button>
+    <button class="tab" data-tab="health">🏦 健全度</button>
+  </nav>
+
+  <main id="panels"></main>
+
+  <p class="foot-note disclaimer">
+    數據為各公司年度合併財報（單位：新台幣億元，EPS 與股利為元）。<br>
+    本頁為自動計算結果，僅供研究參考，不構成投資建議；正式數字請以 MOPS 申報為準。
+  </p>
+</section>
+
+<!-- ── 載入中 ────────────────────────────────── -->
+<div id="loading" class="loading" hidden>
+  <div class="spinner"></div>
+  <p id="loading-text">正在抓取財報…</p>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

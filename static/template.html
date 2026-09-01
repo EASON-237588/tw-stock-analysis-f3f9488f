@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>台股財報分析</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📊</text></svg>">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
+<style>
+__STYLE__
+</style>
+</head>
+<body>
+
+<section id="view-search">
+  <div class="hero">
+    <div class="hero-logo">📊</div>
+    <h1>台股財報分析</h1>
+    <p class="hero-sub">輸入公司名稱或股票代號<br>自動產生經營 / 獲利 / 財務健全度三維分析</p>
+  </div>
+
+  <div class="searchbox">
+    <input id="q" type="search" inputmode="search" autocomplete="off"
+           placeholder="例如：台積電 或 2330" enterkeyhint="search">
+    <button id="go" type="button">分析</button>
+  </div>
+  <ul id="suggest" class="suggest" hidden></ul>
+
+  <div class="hot">
+    <span class="hot-label">熱門</span>
+    <div class="chips">
+      <button class="chip" data-q="2330">2330 台積電</button>
+      <button class="chip" data-q="2317">2317 鴻海</button>
+      <button class="chip" data-q="2454">2454 聯發科</button>
+      <button class="chip" data-q="2308">2308 台達電</button>
+      <button class="chip" data-q="2412">2412 中華電</button>
+      <button class="chip" data-q="2603">2603 長榮</button>
+      <button class="chip" data-q="1101">1101 台泥</button>
+      <button class="chip" data-q="6488">6488 環球晶</button>
+    </div>
+  </div>
+
+  <p class="foot-note">
+    收錄 <b id="stock-count">—</b> 家上市櫃公司，資料來自 FinMind 開放 API，於你的裝置上即時計算。<br>
+    僅供研究參考，不構成投資建議。
+  </p>
+</section>
+
+<section id="view-result" hidden>
+  <header class="topbar">
+    <button id="back" class="icon-btn" type="button" aria-label="返回">‹</button>
+    <div class="topbar-title">
+      <strong id="co-name">—</strong>
+      <span id="co-meta"></span>
+    </div>
+    <button id="share" class="icon-btn" type="button" aria-label="分享">⇪</button>
+  </header>
+
+  <div id="verifybar" class="verifybar"></div>
+  <div id="warnings"></div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="ops">📊 經營</button>
+    <button class="tab" data-tab="profit">💰 獲利</button>
+    <button class="tab" data-tab="health">🏦 健全度</button>
+  </nav>
+
+  <main id="panels"></main>
+
+  <p class="foot-note disclaimer">
+    數據為各公司年度合併財報（單位：新台幣億元，EPS 與股利為元）。<br>
+    本頁為自動計算結果，僅供研究參考，不構成投資建議；正式數字請以 MOPS 申報為準。
+  </p>
+</section>
+
+<div id="loading" class="loading" hidden>
+  <div class="spinner"></div>
+  <p id="loading-text">正在抓取財報…</p>
+</div>
+
+<script>
+/* 上市櫃公司清單：[代號, 簡稱, L=上市 / O=上櫃] */
+var STOCKS = __STOCKS__;
+</script>
+
+<script>
+/* ══════════════════════════════════════════════════════════
+   台股財報分析（純前端版）
+   財報資料：FinMind 開放 API（有開 CORS，瀏覽器可直接取用）
+   所有指標、文案、圖表皆在使用者裝置上即時計算，無需伺服器。
+   ══════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+
+  var FM = 'https://api.finmindtrade.com/api/v4/data';
+  var E = 1e8;                       // 元 → 億元
+  var $ = function (s) { return document.querySelector(s); };
+  var charts = [], DATA = null, CACHE = {};
+
+  /* ── 數值工具 ─────────────────────────── */
+  function div(a, b, scale) {
+    scale = (scale === undefined) ? 100 : scale;
+    if (a === null || a === undefined || !b) return null;
+    return a / b * scale;
+  }
+  function fmt(v, d) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    d = (d === undefined) ? 1 : d;
+    if (Math.abs(v) >= 10000) d = 0;
+    return v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  function sgn(v, d) {
+    if (v === null || v === undefined) return '—';
+    return (v >= 0 ? '+' : '') + fmt(v, d === undefined ? 1 : d);
+  }
+  function clean(a) { return a.filter(function (v) { return v !== null && v !== undefined; }); }
+  function last(a) { var c = clean(a); return c.length ? c[c.length - 1] : null; }
+  function yoy(a) {
+    var c = clean(a);
+    if (c.length < 2 || !c[c.length - 2]) return null;
+    return (c[c.length - 1] - c[c.length - 2]) / Math.abs(c[c.length - 2]) * 100;
+  }
+  function cagr(a) {
+    var c = clean(a);
+    if (c.length < 2 || c[0] <= 0 || c[c.length - 1] <= 0) return null;
+    return (Math.pow(c[c.length - 1] / c[0], 1 / (c.length - 1)) - 1) * 100;
+  }
+  function delta(a) {
+    var c = clean(a);
+    return c.length < 2 ? null : c[c.length - 1] - c[c.length - 2];
+  }
+  function seq(a, d) {
+    return a.map(function (v) { return fmt(v, d === undefined ? 1 : d); }).join(' → ');
+  }
+  function tail(a, n) { return a.slice(Math.max(0, a.length - n)); }
+
+  function arrow(v) {
+    if (v === null || v === undefined || Math.abs(v) < 0.5) return '■';
+    return v > 0 ? '▲' : '▼';
+  }
+  function dirTone(v, invert) {
+    if (v === null || v === undefined || Math.abs(v) < 0.5) return 'blue';
+    var good = invert ? v < 0 : v > 0;
+    return good ? 'green' : 'orange';
+  }
+  function toneBy(v, good, warn, reverse) {
+    if (v === null || v === undefined) return 'blue';
+    if (reverse) return v <= good ? 'green' : (v <= warn ? 'orange' : 'red');
+    return v >= good ? 'green' : (v >= warn ? 'orange' : 'red');
+  }
+
+  /* ── 抓取層 ───────────────────────────── */
+  function fm(dataset, id, start) {
+    var url = FM + '?dataset=' + dataset + '&data_id=' + encodeURIComponent(id) +
+              '&start_date=' + start;
+    return fetch(url).then(function (r) {
+      if (r.status === 402 || r.status === 429) {
+        throw new Error('FinMind 免費額度暫時用完了，請過幾分鐘再試');
+      }
+      if (!r.ok) throw new Error('資料來源回應 ' + r.status + '，請稍後再試');
+      return r.json();
+    }).then(function (j) { return j.data || []; });
+  }
+  function pivot(rows) {
+    var out = {};
+    rows.forEach(function (x) {
+      (out[x.date] = out[x.date] || {})[x.type] = x.value;
+    });
+    return out;
+  }
+  function pick(o, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      if (o && o[keys[i]] !== undefined && o[keys[i]] !== null) return o[keys[i]];
+    }
+    return null;
+  }
+
+  /* ── 主分析流程 ───────────────────────── */
+  function analyze(id, name, market) {
+    var start = (new Date().getFullYear() - 6) + '-01-01';
+    return Promise.all([
+      fm('TaiwanStockFinancialStatements', id, start),
+      fm('TaiwanStockBalanceSheet', id, start),
+      fm('TaiwanStockCashFlowsStatement', id, start),
+      fm('TaiwanStockDividend', id, start).catch(function () { return []; })
+    ]).then(function (res) {
+      var IS = pivot(res[0]), BS = pivot(res[1]), CF = pivot(res[2]), DV = res[3];
+      if (!res[0].length) throw new Error('查無 ' + id + ' 的財報資料，請確認是上市／上櫃公司');
+
+      var qOf = {};
+      Object.keys(IS).forEach(function (d) {
+        (qOf[d.slice(0, 4)] = qOf[d.slice(0, 4)] || []).push(d);
+      });
+      var years = Object.keys(qOf).filter(function (y) {
+        return qOf[y].length === 4 && BS[y + '-12-31'];
+      }).sort();
+      years = tail(years, 5).map(Number);
+      if (!years.length) throw new Error(id + ' 尚無完整年度財報可供分析');
+
+      var dps = {};
+      DV.forEach(function (r) {
+        var m = String(r.year || '').match(/^(\d+)/);
+        if (!m) return;
+        var y = parseInt(m[1], 10) + 1911;
+        dps[y] = (dps[y] || 0) + (r.CashEarningsDistribution || 0);
+      });
+
+      function isSum(y, keys) {
+        var t = null;
+        (qOf[String(y)] || []).forEach(function (d) {
+          var v = pick(IS[d], keys);
+          if (v !== null) t = (t || 0) + v;
+        });
+        return t;
+      }
+      function bsGet(y, keys) { return div(pick(BS[y + '-12-31'], keys), E, 1); }
+      function cfGet(y, keys) { return div(pick(CF[y + '-12-31'], keys), E, 1); }
+      function mapY(f) { return years.map(f); }
+
+      var S = {
+        revenue:      mapY(function (y) { return div(isSum(y, ['Revenue']), E, 1); }),
+        cogs:         mapY(function (y) { return div(isSum(y, ['CostOfGoodsSold']), E, 1); }),
+        gross_profit: mapY(function (y) { return div(isSum(y, ['GrossProfit']), E, 1); }),
+        op_expense:   mapY(function (y) { return div(isSum(y, ['OperatingExpenses']), E, 1); }),
+        op_income:    mapY(function (y) { return div(isSum(y, ['OperatingIncome']), E, 1); }),
+        pretax:       mapY(function (y) { return div(isSum(y, ['PreTaxIncome']), E, 1); }),
+        net_income:   mapY(function (y) { return div(isSum(y,
+                        ['IncomeAfterTaxes', 'TotalConsolidatedProfitForThePeriod']), E, 1); }),
+        eps:          mapY(function (y) { return isSum(y, ['EPS']); }),
+        cash:         mapY(function (y) { return bsGet(y, ['CashAndCashEquivalents']); }),
+        receivable:   mapY(function (y) { return bsGet(y, ['AccountsReceivableNet']); }),
+        inventory:    mapY(function (y) { return bsGet(y, ['Inventories']); }),
+        cur_assets:   mapY(function (y) { return bsGet(y, ['CurrentAssets']); }),
+        cur_liab:     mapY(function (y) { return bsGet(y, ['CurrentLiabilities']); }),
+        liabilities:  mapY(function (y) { return bsGet(y, ['Liabilities']); }),
+        assets:       mapY(function (y) { return bsGet(y, ['TotalAssets']); }),
+        equity:       mapY(function (y) { return bsGet(y,
+                        ['EquityAttributableToOwnersOfParent', 'Equity']); }),
+        ocf:          mapY(function (y) { return cfGet(y,
+                        ['CashFlowsFromOperatingActivities', 'NetCashInflowFromOperatingActivities']); }),
+        icf:          mapY(function (y) { return cfGet(y, ['CashProvidedByInvestingActivities']); }),
+        fcf_fin:      mapY(function (y) { return cfGet(y, ['CashFlowsProvidedFromFinancingActivities']); }),
+        capex:        mapY(function (y) { return cfGet(y, ['PropertyAndPlantAndEquipment']); }),
+        dps:          mapY(function (y) { return dps[y] === undefined ? null : dps[y]; }),
+        sell:         mapY(function () { return null; }),   // 管銷研發明細需 MOPS，純前端無法取得
+        admin:        mapY(function () { return null; }),
+        rd:           mapY(function () { return null; })
+      };
+
+      var n = years.length, M = {};
+      function ratio(name, a, b, scale) {
+        M[name] = [];
+        for (var i = 0; i < n; i++) M[name].push(div(S[a][i], S[b][i], scale));
+      }
+      ratio('gross_margin', 'gross_profit', 'revenue');
+      ratio('op_margin', 'op_income', 'revenue');
+      ratio('net_margin', 'net_income', 'revenue');
+      ratio('opex_ratio', 'op_expense', 'revenue');
+      ratio('sell_ratio', 'sell', 'revenue');
+      ratio('admin_ratio', 'admin', 'revenue');
+      ratio('rd_ratio', 'rd', 'revenue');
+      ratio('current_ratio', 'cur_assets', 'cur_liab');
+      ratio('debt_ratio', 'liabilities', 'assets');
+      ratio('roe', 'net_income', 'equity');
+      ratio('roa', 'net_income', 'assets');
+      M.fcf = S.ocf.map(function (v, i) {
+        return (v === null || S.capex[i] === null) ? null : v + S.capex[i];
+      });
+      M.ocf_to_ni = S.ocf.map(function (v, i) { return div(v, S.net_income[i], 1); });
+      M.payout = S.dps.map(function (v, i) { return div(v, S.eps[i]); });
+
+      var info = lookup(id) || {};
+      var d = {
+        stock_id: id,
+        name: name || info.name || id,
+        market: market || info.market || '',
+        years: years, series: S, metrics: M,
+        kpis: buildKpis(years, S, M),
+        insights: buildInsights(years, S, M),
+        tables: buildTables(years, S, M),
+        metadata: {
+          fetched_at: (function () {
+            var t = new Date(), p = function (n) { return ('0' + n).slice(-2); };
+            return t.getFullYear() + '/' + p(t.getMonth() + 1) + '/' + p(t.getDate()) +
+                   ' ' + p(t.getHours()) + ':' + p(t.getMinutes());
+          })(),
+          mops_url: 'https://mopsov.twse.com.tw/mops/web/t05st01?step=1&co_id=' + id +
+                    '&TYPEK=' + ((market || info.market) === '上櫃' ? 'otc' : 'sii'),
+          finmind_url: FM + '?dataset=TaiwanStockFinancialStatements&data_id=' + id
+        }
+      };
+      d.verification = verify(years, S, M);
+      return d;
+    });
+  }
+
+  /* ── 合理性檢查 ───────────────────────── */
+  function verify(years, S, M) {
+    var w = [];
+    years.forEach(function (y, i) {
+      var gm = M.gross_margin[i], cr = M.current_ratio[i],
+          dr = M.debt_ratio[i], roe = M.roe[i];
+      if (gm !== null && gm > 100)
+        w.push({ level: 'error', field: y + ' 毛利率', msg: fmt(gm) + '% 超過 100%，數據可能有誤' });
+      else if (gm !== null && gm < -50)
+        w.push({ level: 'error', field: y + ' 毛利率', msg: fmt(gm) + '% 低於 -50%，請確認是否為特殊損失年度' });
+      if (cr !== null && cr < 0)
+        w.push({ level: 'error', field: y + ' 流動比率', msg: fmt(cr) + '% 為負值，請檢查資產負債表數據' });
+      if (dr !== null && dr > 100)
+        w.push({ level: 'warn', field: y + ' 負債比率', msg: fmt(dr) + '% 超過 100%，若非金融業則為警示訊號' });
+      if (roe !== null && roe > 100)
+        w.push({ level: 'warn', field: y + ' ROE', msg: fmt(roe) + '% 超過 100%，可能為高槓桿，請確認股東權益是否偏低' });
+    });
+    for (var i = 1; i < years.length; i++) {
+      var a = M.net_margin[i - 1], b = M.net_margin[i];
+      if (a !== null && b !== null && Math.abs(b - a) > 30)
+        w.push({ level: 'warn', field: years[i - 1] + '→' + years[i] + ' 淨利率',
+                 msg: '波動 ' + sgn(b - a) + ' 個百分點，建議確認是否有一次性損益' });
+    }
+    if (M.gross_margin.every(function (v) { return v === null; }))
+      w.push({ level: 'warn', field: '行業別',
+               msg: '本公司財報無「營業毛利」與「流動／非流動」分類（金融、保險、證券等特殊行業），' +
+                    '毛利率、營業利益率、流動比率不適用，負債比率偏高亦屬行業常態' });
+    w.push({ level: 'warn', field: '費用明細',
+             msg: '管銷研發拆分需另查 MOPS，本版以營業費用合計呈現' });
+    return { sanity: w, sanity_pass: w.every(function (x) { return x.level !== 'error'; }) };
+  }
+
+  /* ── KPI ──────────────────────────────── */
+  function kpi(label, value, sub, tone) {
+    return { label: label, value: value, sub: sub, tone: tone };
+  }
+  function buildKpis(years, S, M) {
+    var yl = years.map(String), y1 = yl[yl.length - 1];
+    var special = M.gross_margin.every(function (v) { return v === null; });
+    var rY = yoy(S.revenue), rC = cagr(S.revenue);
+    var cr = last(M.current_ratio), dr = last(M.debt_ratio), om = last(M.op_margin);
+
+    var ops = [
+      kpi('年度營收', fmt(last(S.revenue), 0), '億元　' + (rY === null ? '—' :
+        arrow(rY) + ' ' + sgn(rY) + '% YoY（' + y1 + '年）；' +
+        years.length + '年 CAGR ' + sgn(rC) + '%'), dirTone(rY)),
+      kpi('毛利率', fmt(last(M.gross_margin)) + '%',
+        arrow(delta(M.gross_margin)) + ' ' + seq(tail(M.gross_margin, 3)) + '%（' +
+        tail(yl, 3).join('/') + '）', dirTone(delta(M.gross_margin))),
+      kpi('營業利益率', fmt(om) + '%',
+        arrow(delta(M.op_margin)) + ' 較前一年 ' + sgn(delta(M.op_margin)) +
+        ' 個百分點；營業利益 ' + fmt(last(S.op_income), 0) + ' 億', dirTone(delta(M.op_margin))),
+      kpi('營業費用率', fmt(last(M.opex_ratio)) + '%',
+        arrow(delta(M.opex_ratio)) + ' 營業費用 ' + fmt(last(S.op_expense), 0) + ' 億；' +
+        seq(tail(M.opex_ratio, 3)) + '%', dirTone(delta(M.opex_ratio), true)),
+      kpi('營業利益', fmt(last(S.op_income), 0), '億元　' + arrow(yoy(S.op_income)) + ' ' +
+        sgn(yoy(S.op_income)) + '% YoY；稅前淨利 ' + fmt(last(S.pretax), 0) + ' 億',
+        dirTone(yoy(S.op_income)))
+    ];
+
+    var profit = [
+      kpi('稅後淨利', fmt(last(S.net_income), 0), '億元　' + (yoy(S.net_income) === null ? '—' :
+        arrow(yoy(S.net_income)) + ' ' + sgn(yoy(S.net_income)) + '% YoY；淨利率 ' +
+        fmt(last(M.net_margin)) + '%'), dirTone(yoy(S.net_income))),
+      kpi('EPS', fmt(last(S.eps), 2), '元　' + (yoy(S.eps) === null ? '—' :
+        arrow(yoy(S.eps)) + ' ' + sgn(yoy(S.eps)) + '% YoY；' + seq(tail(S.eps, 3), 2) + ' 元'),
+        dirTone(yoy(S.eps))),
+      kpi('ROE', fmt(last(M.roe)) + '%',
+        arrow(delta(M.roe)) + ' ' + seq(tail(M.roe, 3)) + '%；' +
+        ((last(M.roe) || 0) >= 15 ? '高於' : '低於') + ' 15% 標竿', toneBy(last(M.roe), 15, 8)),
+      kpi('ROA', fmt(last(M.roa)) + '%',
+        arrow(delta(M.roa)) + ' 總資產 ' + fmt(last(S.assets), 0) + ' 億；較前一年 ' +
+        sgn(delta(M.roa)) + ' 個百分點', toneBy(last(M.roa), 8, 3)),
+      kpi('三層利潤率',
+        om !== null ? fmt(last(M.gross_margin)) + '/' + fmt(om) + '/' + fmt(last(M.net_margin))
+                    : fmt(last(M.net_margin)) + '%',
+        om !== null
+          ? '毛利／營益／淨利（%）；' + y1 + ' 年淨利率較前一年 ' + sgn(delta(M.net_margin)) + ' 個百分點'
+          : '本公司財報無毛利／營業利益分類（金融等特殊行業），僅列淨利率；較前一年 ' +
+            sgn(delta(M.net_margin)) + ' 個百分點',
+        dirTone(delta(M.net_margin)))
+    ];
+
+    var health = [
+      kpi('流動比率', fmt(cr, 0) + '%',
+        arrow(delta(M.current_ratio)) + ' ' + seq(tail(M.current_ratio, 3), 0) + '%；' +
+        (cr === null ? '財報未分流動／非流動（金融等特殊行業），此指標不適用'
+          : cr >= 200 ? '高於 200% 優異' : cr >= 150 ? '高於 150% 健康' : '低於 150% 警戒線'),
+        toneBy(cr, 150, 100)),
+      kpi('負債比率', fmt(dr) + '%',
+        arrow(delta(M.debt_ratio)) + ' ' + seq(tail(M.debt_ratio, 3)) + '%；' +
+        (special ? '金融業以存款與負債經營，高負債比為行業常態'
+          : (dr || 0) >= 60 ? '已逾 60% 需關注' : '維持 60% 以下'),
+        toneBy(dr, 50, 65, true)),
+      kpi('現金部位', fmt(last(S.cash), 0), '億元　' + arrow(yoy(S.cash)) + ' ' +
+        sgn(yoy(S.cash)) + '% YoY；占總資產 ' + fmt(div(last(S.cash), last(S.assets))) + '%',
+        dirTone(yoy(S.cash))),
+      kpi('營業現金流', fmt(last(S.ocf), 0), '億元　營業CF／淨利 = ' + fmt(last(M.ocf_to_ni), 2) +
+        ' 倍' + ((last(M.ocf_to_ni) || 0) >= 1 ? '（> 1 佳）' : '（< 1 需留意）'),
+        toneBy(last(M.ocf_to_ni), 1, 0.7)),
+      kpi('自由現金流', fmt(last(M.fcf), 0), '億元　營業CF ' + fmt(last(S.ocf), 0) +
+        ' － 資本支出 ' + fmt(Math.abs(last(S.capex) || 0), 0) + ' 億',
+        (last(M.fcf) || 0) > 0 ? 'green' : 'orange')
+    ];
+
+    function usable(cards) {
+      return cards.filter(function (c) { return String(c.value).charAt(0) !== '—'; });
+    }
+    return { ops: usable(ops), profit: usable(profit), health: usable(health) };
+  }
+
+  /* ── Insight ──────────────────────────── */
+  function buildInsights(years, S, M) {
+    var yl = years.map(String), y1 = yl[yl.length - 1];
+    var ops = [], profit = [], health = [];
+    var rY = yoy(S.revenue), rC = cagr(S.revenue);
+
+    if (rY !== null) {
+      ops.push(years.length + ' 年營收 ' + seq(S.revenue, 0) + ' 億元，CAGR ' + sgn(rC) + '%，' +
+        y1 + ' 年' + ((rC || 0) < rY ? '加速成長 ' : '成長趨緩 ') + sgn(rY) + '%。');
+    }
+    var gd = delta(M.gross_margin);
+    if (gd !== null) {
+      ops.push('毛利率 ' + seq(tail(M.gross_margin, 3)) + '%，' + y1 + ' 年較前一年 ' + sgn(gd) +
+        ' 個百分點，' + (gd > 0.5 ? '反映產品組合／成本控制改善。'
+          : gd < -0.5 ? '成本端壓力上升，需觀察售價轉嫁能力。' : '維持高檔震盪，結構穩定。'));
+    }
+    var od = delta(M.opex_ratio);
+    if (od !== null) {
+      ops.push('營業費用率 ' + seq(tail(M.opex_ratio, 3)) + '%，' +
+        (od < -0.2 ? '隨營收規模擴大而下降 ' + fmt(Math.abs(od)) + ' 個百分點，規模效益浮現。'
+          : od > 0.2 ? '上升 ' + fmt(od) + ' 個百分點，費用成長快於營收。'
+          : '大致持平，費用管控穩定。'));
+    }
+    var omd = delta(M.op_margin);
+    if (omd !== null) {
+      ops.push('營業利益 ' + fmt(last(S.op_income), 0) + ' 億，利益率 ' +
+        seq(tail(M.op_margin, 3)) + '%，' +
+        (omd > 0.5 ? '毛利提升與費用攤薄同時發生，本業獲利力增強。'
+          : omd < -0.5 ? '本業獲利力較前一年收斂。' : '本業獲利力維持穩定。'));
+    }
+    if (last(S.cogs) !== null) {
+      ops.push(y1 + ' 年營業成本 ' + fmt(last(S.cogs), 0) + ' 億（占營收 ' +
+        fmt(div(last(S.cogs), last(S.revenue))) + '%）、營業費用 ' + fmt(last(S.op_expense), 0) +
+        ' 億，成本費用合計吃掉營收的 ' +
+        fmt(div((last(S.cogs) || 0) + (last(S.op_expense) || 0), last(S.revenue))) + '%。');
+    }
+
+    var eY = yoy(S.eps);
+    if (eY !== null) {
+      var peak = Math.max.apply(null, clean(S.eps));
+      profit.push('EPS ' + seq(S.eps, 2) + ' 元，' + y1 + ' 年 ' + sgn(eY) + '% YoY，' +
+        (Math.abs(last(S.eps) - peak) < 1e-9 ? '創期間新高。' : '尚未回到期間高點。'));
+    }
+    var nY = yoy(S.net_income);
+    if (nY !== null && rY !== null) {
+      var cmp = nY > rY ? '高於營收成長'
+        : (nY < 0 && rY < 0) ? '衰退幅度大於營收' : '低於營收成長';
+      profit.push('稅後淨利 ' + fmt(last(S.net_income), 0) + ' 億（' + sgn(nY) + '%）' + cmp +
+        '（' + sgn(rY) + '%），淨利率' + (nY > rY ? '擴張' : '收斂') + '至 ' +
+        fmt(last(M.net_margin)) + '%。');
+    }
+    var rd_ = delta(M.roe);
+    if (rd_ !== null) {
+      profit.push('ROE ' + seq(tail(M.roe, 3)) + '%，' + y1 + ' 年 ' + sgn(rd_) + ' 個百分點，' +
+        (rd_ > 0 ? '獲利成長快於股東權益累積。' : '權益累積速度快於獲利成長，資本效率下滑。'));
+    }
+    if (last(M.op_margin) !== null) {
+      profit.push('三層利潤率 ' + y1 + ' 年為毛利 ' + fmt(last(M.gross_margin)) + '%／營益 ' +
+        fmt(last(M.op_margin)) + '%／淨利 ' + fmt(last(M.net_margin)) + '%，營益到淨利差距 ' +
+        sgn(last(M.net_margin) - last(M.op_margin)) + ' 個百分點（業外與稅負影響）。');
+    }
+    if (last(S.dps) !== null) {
+      profit.push('現金股利 ' + seq(tail(S.dps, 3), 2) + ' 元／股，' + y1 + ' 年配息率約 ' +
+        fmt(last(M.payout), 0) + '%。');
+    }
+
+    var cr = last(M.current_ratio);
+    if (cr !== null) {
+      health.push('流動比率 ' + seq(tail(M.current_ratio, 3), 0) + '%，' +
+        (cr >= 200 ? '維持 200% 以上，短期償債能力優異。'
+          : cr >= 150 ? '高於 150% 健康水準。' : '低於 150% 警戒線，短期流動性需留意。'));
+    }
+    var dr = last(M.debt_ratio);
+    if (dr !== null) {
+      health.push('負債比率 ' + seq(tail(M.debt_ratio, 3)) + '%，' + y1 + ' 年 ' +
+        sgn(delta(M.debt_ratio)) + ' 個百分點，' +
+        (dr >= 60 ? '已超過 60%，槓桿偏高需持續追蹤。' : '維持 60% 以下的安全區間。'));
+    }
+    var cY = yoy(S.cash);
+    if (cY !== null) {
+      health.push('現金及約當現金 ' + fmt(last(S.cash), 0) + ' 億（' + sgn(cY) + '% YoY），占總資產 ' +
+        fmt(div(last(S.cash), last(S.assets))) + '%，當年資本支出 ' +
+        fmt(Math.abs(last(S.capex) || 0), 0) + ' 億、融資活動淨額 ' + fmt(last(S.fcf_fin), 0) + ' 億。');
+    }
+    var q = last(M.ocf_to_ni);
+    if (q !== null) {
+      health.push('營業現金流 ' + fmt(last(S.ocf), 0) + ' 億為稅後淨利的 ' + fmt(q, 2) + ' 倍，' +
+        (q >= 1 ? '獲利品質良好（現金實現度 > 1）。' : '低於 1 倍，需檢視應收與存貨的資金占用。'));
+    }
+    var f = last(M.fcf);
+    if (f !== null) {
+      health.push('自由現金流 ' + fmt(f, 0) + ' 億（營業CF ' + fmt(last(S.ocf), 0) + ' － 資本支出 ' +
+        fmt(Math.abs(last(S.capex) || 0), 0) + '），' +
+        (f > 0 ? '足以支應股利與再投資。' : '為負數，擴張期資本支出大於營運現金產出。'));
+    }
+    return { ops: ops, profit: profit, health: health };
+  }
+
+  /* ── 表格趨勢評估 ─────────────────────── */
+  function trend(series, opt) {
+    opt = opt || {};
+    var c = clean(series);
+    if (c.length < 2) return { t: '— 資料不足', tone: 'neutral' };
+    var a = c[c.length - 2], b = c[c.length - 1], d = b - a;
+    var rel = a ? d / Math.abs(a) * 100 : null;
+    var th = opt.threshold === undefined ? 1 : opt.threshold;
+    var amt = opt.pct ? sgn(d) + 'pp' : (rel === null ? sgn(d) : sgn(rel) + '%');
+    var moved = opt.pct ? Math.abs(d) >= th : (rel !== null && Math.abs(rel) >= th);
+    if (!moved) return { t: '■ 大致持平', tone: 'neutral' };
+    var up = d > 0, good = opt.invert ? !up : up, txt;
+    if (opt.invert) {
+      txt = (up ? '▲ 增 ' : '▼ 減 ') + amt.replace(/^[+-]/, '');
+    } else if (up && Math.abs(b - Math.max.apply(null, c)) < 1e-9) {
+      txt = '▲ 創新高 ' + amt;
+    } else if (!up && Math.abs(b - Math.min.apply(null, c)) < 1e-9) {
+      txt = '▼ 探新低 ' + amt;
+    } else {
+      txt = (up ? '▲ ' : '▼ ') + amt;
+    }
+    return { t: txt, tone: good ? 'up' : 'down' };
+  }
+  function row(name, series, digits, opt) {
+    var r = trend(series, opt);
+    return {
+      name: name,
+      values: series.map(function (v) { return v === null ? '—' : fmt(v, digits); }),
+      trend: r.t, tone: r.tone
+    };
+  }
+  function buildTables(years, S, M) {
+    var k = 3, cols = tail(years, k).map(String);
+    function s(a) { return tail(a, k); }
+    return {
+      ops: { title: '損益表明細（億元）', cols: cols, rows: [
+        row('營業收入', s(S.revenue), 0),
+        row('營業成本', s(S.cogs), 0, { invert: true }),
+        row('營業毛利', s(S.gross_profit), 0),
+        row('毛利率 %', s(M.gross_margin), 1, { pct: true }),
+        row('營業費用', s(S.op_expense), 0, { invert: true }),
+        row('費用率 %', s(M.opex_ratio), 1, { pct: true, invert: true }),
+        row('營業利益', s(S.op_income), 0),
+        row('營業利益率 %', s(M.op_margin), 1, { pct: true })
+      ] },
+      profit: { title: '獲利能力彙總', cols: cols, rows: [
+        row('稅前淨利（億）', s(S.pretax), 0),
+        row('稅後淨利（億）', s(S.net_income), 0),
+        row('EPS（元）', s(S.eps), 2),
+        row('毛利率 %', s(M.gross_margin), 1, { pct: true }),
+        row('營業利益率 %', s(M.op_margin), 1, { pct: true }),
+        row('淨利率 %', s(M.net_margin), 1, { pct: true }),
+        row('ROE %', s(M.roe), 1, { pct: true }),
+        row('ROA %', s(M.roa), 1, { pct: true }),
+        row('現金股利（元）', s(S.dps), 2),
+        row('配息率 %', s(M.payout), 0, { pct: true, threshold: 3 })
+      ] },
+      health: { title: '資產負債與現金流（億元）', cols: cols, rows: [
+        row('現金及約當現金', s(S.cash), 0),
+        row('應收帳款', s(S.receivable), 0),
+        row('存貨', s(S.inventory), 0, { invert: true }),
+        row('流動資產', s(S.cur_assets), 0),
+        row('流動負債', s(S.cur_liab), 0, { invert: true }),
+        row('負債總額', s(S.liabilities), 0, { invert: true }),
+        row('股東權益', s(S.equity), 0),
+        row('資產總額', s(S.assets), 0),
+        row('流動比率 %', s(M.current_ratio), 0, { pct: true, threshold: 5 }),
+        row('負債比率 %', s(M.debt_ratio), 1, { pct: true, invert: true }),
+        row('營業活動現金流', s(S.ocf), 0),
+        row('投資活動現金流', s(S.icf), 0),
+        row('融資活動現金流', s(S.fcf_fin), 0),
+        row('資本支出', s(S.capex), 0),
+        row('自由現金流', s(M.fcf), 0)
+      ] }
+    };
+  }
+
+  /* ══ 以下為介面 ══════════════════════════ */
+
+  var COLOR = { brand: '#2563eb', teal: '#0d9488', amber: '#f59e0b', rose: '#e11d48',
+                violet: '#7c3aed', orange: '#ea580c' };
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var GRID = dark ? 'rgba(148,163,184,.18)' : 'rgba(100,116,139,.16)';
+  var TICK = dark ? '#94a3b8' : '#64748b';
+
+  function show(el, on) { el.hidden = !on; }
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== null && text !== undefined) n.textContent = text;
+    return n;
+  }
+  function toast(msg) {
+    var t = el('div', 'toast', msg);
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 4600);
+  }
+
+  function lookup(id) {
+    for (var i = 0; i < STOCKS.length; i++) {
+      if (STOCKS[i][0] === id) {
+        return { id: id, name: STOCKS[i][1], market: STOCKS[i][2] === 'O' ? '上櫃' : '上市' };
+      }
+    }
+    return null;
+  }
+  function search(q, limit) {
+    q = (q || '').trim();
+    if (!q) return [];
+    var digits = /^\d+$/.test(q), out = [];
+    STOCKS.forEach(function (s) {
+      var score = null;
+      if (digits) { if (s[0].indexOf(q) === 0) score = 0; }
+      else if (s[1] === q) score = 0;
+      else if (s[1].indexOf(q) === 0) score = 1;
+      else if (s[1].indexOf(q) >= 0) score = 2;
+      if (score !== null) out.push([score, s]);
+    });
+    out.sort(function (a, b) { return a[0] - b[0] || (a[1][0] < b[1][0] ? -1 : 1); });
+    return out.slice(0, limit || 12).map(function (x) {
+      return { id: x[1][0], name: x[1][1], market: x[1][2] === 'O' ? '上櫃' : '上市' };
+    });
+  }
+
+  var qInput = $('#q'), suggest = $('#suggest'), timer = null;
+  $('#stock-count').textContent = STOCKS.length.toLocaleString('en-US');
+
+  qInput.addEventListener('input', function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      var list = search(qInput.value);
+      suggest.innerHTML = '';
+      if (!list.length) { show(suggest, false); return; }
+      list.forEach(function (s) {
+        var li = el('li');
+        li.appendChild(el('span', 'sid', s.id));
+        li.appendChild(el('span', 'sname', s.name));
+        li.appendChild(el('span', 'smkt', s.market));
+        li.addEventListener('click', function () {
+          qInput.value = s.id + ' ' + s.name;
+          show(suggest, false);
+          run(s.id);
+        });
+        suggest.appendChild(li);
+      });
+      show(suggest, true);
+    }, 120);
+  });
+  qInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { show(suggest, false); qInput.blur(); run(qInput.value); }
+  });
+  $('#go').addEventListener('click', function () { show(suggest, false); run(qInput.value); });
+  Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) {
+    c.addEventListener('click', function () { run(c.dataset.q); });
+  });
+  $('#back').addEventListener('click', function () {
+    show($('#view-result'), false);
+    show($('#view-search'), true);
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    window.scrollTo(0, 0);
+  });
+  $('#share').addEventListener('click', function () {
+    if (!DATA) return;
+    var url = location.href.split('#')[0] + '#' + DATA.stock_id;
+    var payload = { title: DATA.name + ' ' + DATA.stock_id + ' 財報分析', url: url };
+    if (navigator.share) { navigator.share(payload).catch(function () {}); }
+    else if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(function () { toast('已複製連結：' + url); });
+    } else { toast(url); }
+  });
+  window.addEventListener('hashchange', function () {
+    var h = location.hash.slice(1);
+    if (h && (!DATA || DATA.stock_id !== h)) run(h);
+  });
+
+  function run(q) {
+    q = (q || '').trim().split(/\s+/)[0];
+    if (!q) { toast('請先輸入公司名稱或股票代號'); return; }
+    var hit = /^\d{4}$/.test(q) ? (lookup(q) || { id: q, name: q, market: '' }) : search(q, 1)[0];
+    if (!hit) { toast('找不到「' + q + '」，請確認是上市／上櫃公司的名稱或 4 位數代號'); return; }
+
+    if (CACHE[hit.id]) { render(CACHE[hit.id]); return; }
+    show($('#loading'), true);
+    $('#loading-text').textContent = '正在抓取 ' + hit.name + ' 的財報…';
+    analyze(hit.id, hit.name, hit.market).then(function (d) {
+      CACHE[hit.id] = d;
+      show($('#loading'), false);
+      render(d);
+    }).catch(function (e) {
+      show($('#loading'), false);
+      toast(e.message || '分析失敗，請稍後再試');
+    });
+  }
+
+  function render(d) {
+    DATA = d;
+    show($('#view-search'), false);
+    show($('#view-result'), true);
+    window.scrollTo(0, 0);
+    if (location.hash.slice(1) !== d.stock_id) {
+      history.replaceState(null, '', '#' + d.stock_id);
+    }
+    $('#co-name').textContent = d.name;
+    $('#co-meta').textContent = d.stock_id + '　' + (d.market || '') + '　' +
+      d.years[0] + '–' + d.years[d.years.length - 1] + ' 年度合併財報';
+    renderVerify(d);
+    renderPanels(d);
+    switchTab('ops');
+  }
+
+  function renderVerify(d) {
+    var m = d.metadata, v = d.verification, bar = $('#verifybar');
+    bar.innerHTML = '';
+    var errs = v.sanity.filter(function (w) { return w.level === 'error'; }).length;
+    var warns = v.sanity.length - errs;
+    bar.appendChild(el('span', 'badge ' + (errs ? 'err' : warns ? 'warn' : 'ok'),
+      errs ? '合理性檢查 ' + errs + ' 項異常'
+        : warns ? '合理性檢查 ' + warns + ' 項提醒' : '合理性檢查通過'));
+    bar.appendChild(el('span', null, '更新 ' + m.fetched_at));
+    var a = el('a', null, 'MOPS 原始申報');
+    a.href = m.mops_url; a.target = '_blank'; a.rel = 'noopener';
+    bar.appendChild(a);
+    var b = el('a', null, 'FinMind 原始資料');
+    b.href = m.finmind_url; b.target = '_blank'; b.rel = 'noopener';
+    bar.appendChild(b);
+
+    var box = $('#warnings');
+    box.innerHTML = '';
+    v.sanity.forEach(function (w) {
+      var n = el('div', 'warn-item' + (w.level === 'error' ? ' error' : ''));
+      n.appendChild(el('b', null, (w.level === 'error' ? '❌ ' : '⚠️ ') + w.field));
+      n.appendChild(el('span', null, w.msg));
+      box.appendChild(n);
+    });
+  }
+
+  var TAB_TITLE = { ops: '經營分析', profit: '獲利分析', health: '財務健全度' };
+
+  function renderPanels(d) {
+    charts.forEach(function (c) { c.destroy(); });
+    charts = [];
+    var host = $('#panels');
+    host.innerHTML = '';
+
+    ['ops', 'profit', 'health'].forEach(function (key) {
+      var panel = el('section', 'panel');
+      panel.id = 'panel-' + key;
+      panel.hidden = true;
+
+      var grid = el('div', 'kpi-grid');
+      (d.kpis[key] || []).forEach(function (k) {
+        var card = el('div', 'kpi ' + (k.tone || 'blue'));
+        card.appendChild(el('div', 'kpi-label', k.label));
+        card.appendChild(el('div', 'kpi-value', k.value));
+        card.appendChild(el('div', 'kpi-sub', k.sub));
+        grid.appendChild(card);
+      });
+      panel.appendChild(grid);
+
+      var ins = el('div', 'insight');
+      ins.appendChild(el('h3', null, '🔍 ' + TAB_TITLE[key] + '亮點'));
+      var ul = el('ul');
+      (d.insights[key] || []).forEach(function (t) { ul.appendChild(el('li', null, t)); });
+      ins.appendChild(ul);
+      panel.appendChild(ins);
+
+      var wrap = el('div', 'charts');
+      var specs = chartSpecs(key, d);
+      specs.forEach(function (spec, i) {
+        var card = el('div', 'chart-card');
+        card.appendChild(el('div', 'chart-title', spec.title));
+        var cont = el('div', 'chart-container');
+        var cv = document.createElement('canvas');
+        cv.id = 'cv-' + key + '-' + i;
+        cont.appendChild(cv);
+        card.appendChild(cont);
+        wrap.appendChild(card);
+      });
+      panel.appendChild(wrap);
+      panel.appendChild(tableCard(d.tables[key]));
+      host.appendChild(panel);
+
+      specs.forEach(function (spec, i) {
+        drawChart(document.getElementById('cv-' + key + '-' + i), spec, d);
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
+      t.onclick = function () { switchTab(t.dataset.tab); };
+    });
+  }
+
+  function switchTab(key) {
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
+      t.classList.toggle('active', t.dataset.tab === key);
+    });
+    ['ops', 'profit', 'health'].forEach(function (k) {
+      var p = document.getElementById('panel-' + k);
+      if (p) p.hidden = (k !== key);
+    });
+  }
+
+  function tableCard(t) {
+    var card = el('div', 'table-card');
+    if (!t) return card;
+    card.appendChild(el('h3', null, t.title));
+    var scroll = el('div', 'table-scroll'), table = el('table');
+    var thead = el('thead'), htr = el('tr');
+    htr.appendChild(el('th', null, '項目'));
+    t.cols.forEach(function (c) { htr.appendChild(el('th', null, c)); });
+    htr.appendChild(el('th', null, '趨勢評估'));
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    var tbody = el('tbody');
+    t.rows.forEach(function (r) {
+      if (r.values.every(function (v) { return v === '—'; })) return;
+      var tr = el('tr');
+      tr.appendChild(el('td', null, r.name));
+      r.values.forEach(function (v) { tr.appendChild(el('td', null, v)); });
+      tr.appendChild(el('td', 'trend ' + (r.tone || 'neutral'), r.trend));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    scroll.appendChild(table);
+    card.appendChild(scroll);
+    return card;
+  }
+
+  function chartSpecs(key, d) {
+    var S = d.series, M = d.metrics;
+    if (key === 'ops') {
+      return [
+        { title: '營收與毛利率', bars: [['營收（億）', S.revenue, COLOR.brand]],
+          lines: [['毛利率 %', M.gross_margin, COLOR.amber]] },
+        { title: '成本與費用結構（億元）', stacked: true, bars: [
+            ['營業成本', S.cogs, COLOR.rose], ['營業費用', S.op_expense, COLOR.violet]] },
+        { title: '毛利率與費用率（%）', singleAxis: true, lines: [
+            ['毛利率', M.gross_margin, COLOR.amber],
+            ['營業費用率', M.opex_ratio, COLOR.violet]] },
+        { title: '營業利益與利益率', bars: [['營業利益（億）', S.op_income, COLOR.teal]],
+          lines: [['營益率 %', M.op_margin, COLOR.rose]] }
+      ];
+    }
+    if (key === 'profit') {
+      return [
+        { title: '稅後淨利與淨利率', bars: [['稅後淨利（億）', S.net_income, COLOR.brand]],
+          lines: [['淨利率 %', M.net_margin, COLOR.amber]] },
+        { title: 'EPS（元）', bars: [['EPS', S.eps, COLOR.teal]] },
+        { title: '三層利潤率（%）', singleAxis: true, lines: [
+            ['毛利率', M.gross_margin, COLOR.brand], ['營益率', M.op_margin, COLOR.teal],
+            ['淨利率', M.net_margin, COLOR.rose]] },
+        { title: '現金股利與配息率', bars: [['現金股利（元）', S.dps, COLOR.violet]],
+          lines: [['配息率 %', M.payout, COLOR.amber]] }
+      ];
+    }
+    return [
+      { title: '資產負債結構（億元）', stacked: true, bars: [
+          ['負債總額', S.liabilities, COLOR.rose], ['股東權益', S.equity, COLOR.teal]] },
+      { title: '現金流量三表（億元）', bars: [
+          ['營業活動', S.ocf, COLOR.brand], ['投資活動', S.icf, COLOR.orange],
+          ['融資活動', S.fcf_fin, COLOR.violet]] },
+      { title: '流動比率與負債比率（%）', singleAxis: true, lines: [
+          ['流動比率', M.current_ratio, COLOR.teal], ['負債比率', M.debt_ratio, COLOR.rose]] },
+      { title: '現金部位與占資產比', bars: [['現金及約當現金（億）', S.cash, COLOR.brand]],
+        lines: [['占總資產 %', S.cash.map(function (v, i) {
+          return (v === null || !S.assets[i]) ? null : v / S.assets[i] * 100;
+        }), COLOR.amber]] }
+    ];
+  }
+
+  function drawChart(canvas, spec, d) {
+    if (!canvas || typeof Chart === 'undefined') return;
+    var datasets = [];
+    var dual = spec.bars && spec.lines && !spec.singleAxis;
+    (spec.bars || []).forEach(function (b) {
+      datasets.push({ type: 'bar', label: b[0], data: b[1], backgroundColor: b[2],
+                      borderRadius: 4, yAxisID: 'y', order: 2, maxBarThickness: 44 });
+    });
+    (spec.lines || []).forEach(function (l) {
+      datasets.push({ type: 'line', label: l[0], data: l[1], borderColor: l[2],
+                      backgroundColor: l[2], borderWidth: 2, tension: .3, pointRadius: 3,
+                      pointHoverRadius: 5, spanGaps: true,
+                      yAxisID: dual ? 'y2' : 'y', order: 1 });
+    });
+    var scales = {
+      x: { stacked: !!spec.stacked, grid: { display: false },
+           ticks: { color: TICK, font: { size: 11 } } },
+      y: { stacked: !!spec.stacked, position: 'left', grid: { color: GRID },
+           ticks: { color: TICK, font: { size: 10 }, callback: function (v) {
+             return Math.abs(v) >= 10000 ? (v / 10000).toFixed(1) + '萬' : v;
+           } } }
+    };
+    if (dual) {
+      scales.y2 = { position: 'right', grid: { drawOnChartArea: false },
+                    ticks: { color: TICK, font: { size: 10 } } };
+    }
+    charts.push(new Chart(canvas, {
+      data: { labels: d.years.map(String), datasets: datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { boxWidth: 10, boxHeight: 10, color: TICK,
+                              font: { size: 11 }, usePointStyle: true } },
+          tooltip: { callbacks: { label: function (c) {
+            var v = c.parsed.y;
+            return c.dataset.label + '：' +
+              (v === null ? '—' : v.toLocaleString('zh-TW', { maximumFractionDigits: 2 }));
+          } } }
+        },
+        scales: scales
+      }
+    }));
+  }
+
+  if (location.hash.length > 1) run(location.hash.slice(1));
+})();
+</script>
+</body>
+</html>
